@@ -3,18 +3,23 @@ import os
 import sys
 import codecs
 import json
+import re
 from dotenv import load_dotenv
 from google import genai
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from slack_bolt.async_app import AsyncApp
+from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 
 if sys.platform == "win32":
     sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
 
 load_dotenv()
-gemini_api_key = os.getenv("GEMINI_API_KEY")
 
-async def main():
+slack_app = AsyncApp(token=os.getenv("SLACK_BOT_TOKEN"))
+gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+async def jira_islemini_yap(kullanici_mesaji: str) -> str:
     my_env = os.environ.copy()
     my_env["PYTHONIOENCODING"] = "utf-8"
 
@@ -24,70 +29,89 @@ async def main():
         env=my_env
     )
 
-    print("🔄 Ajan: Sistemler baslatiliyor...\n")
-    
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            ai_client = genai.Client(api_key=gemini_api_key)
-            
-            # KULLANICI MESAJI
-            kullanici_mesaji = "TEAM-1 kodlu biletin önceliğini High yapıp Backend etiketini ekler misin? Çok acil!"
-            
-            print(f"👤 KULLANICI MESAJI: {kullanici_mesaji}\n")
-            print("🧠 BEYİN (Gemini): Durumu analiz edip hangi aleti kullanacağına karar veriyor...\n")
 
+            # YENİ PROMPT: Artık sohbet edebiliyor ve eksik bilgileri sorabiliyor!
             prompt = f"""
-            Sen, Atlassian Jira üzerinde tam yetkiye sahip, Agile (Scrum/Kanban) süreçlerine hakim 'Kıdemli Yapay Zeka Yöneticisi'sin.
-            Kullanıcıdan gelen mesajı analiz et ve aşağıdaki YETENEKLER LİSTESİ'nden uygun olanı seç.
+            Sen Jira üzerinde yetkili bir Proje Yöneticisi Yapay Zekasısın.
+            Gelen Mesaj: '{kullanici_mesaji}'
 
-            YETENEKLER LİSTESİ:
-            1. bilet_olustur (Parametreler: proje_kodu, baslik, aciklama) - Yeni iş, görev, bug açılacağı zaman.
-            2. bilet_guncelle (Parametreler: bilet_kodu, oncelik, etiket) - Bir biletin önemi (High/Medium/Low) veya alanı (Backend/Web/iOS) değişeceği zaman.
-            3. bilet_durumunu_guncelle (Parametreler: bilet_kodu, yeni_durum) - Bir iş 'To Do', 'In Progress' veya 'Done' aşamasına alınacağı zaman.
+            YETENEKLER:
+            1. bilet_olustur (Parametreler: proje_kodu, baslik, aciklama, oncelik(SADECE: Highest, High, Medium, Low veya Lowest yaz), etiket)
+            2. bilet_guncelle (Parametreler: bilet_kodu, oncelik, etiket)
+            3. bilet_durumunu_guncelle (Parametreler: bilet_kodu, yeni_durum)
+            4. sohbet_et (Eğer kullanıcının isteği eksikse, proje kodu yoksa, ne yapacağını anlamadıysan veya sana sadece selam veriyorsa bu aleti seç. Parametreler: cevap_mesaji)
 
-            KULLANICI MESAJI: '{kullanici_mesaji}'
-
-            Lütfen analizini yap ve bana SADECE aşağıdaki formatta bir JSON döndür. Kodu markdown block (```json) içine ALMA. Sadece süslü parantezlerle başla ve bitir:
+            Bana SADECE şu JSON formatında cevap ver, markdown kullanma:
             {{
                 "kullanilacak_alet": "secilen_aletin_adi",
                 "parametreler": {{
-                    "parametre_adi": "parametre_değeri"
+                    "parametre_adi": "deger"
                 }}
             }}
             """
-            
-            cevap = ai_client.models.generate_content(
+
+            cevap = gemini_client.models.generate_content(
                 model='gemini-3.5-flash',
                 contents=prompt
             )
-            
-            try:
-                # Gemini bazen inatla başına ```json ekler, onu temizliyoruz
-                temiz_cevap = cevap.text.strip()
-                if temiz_cevap.startswith("```json"):
-                    temiz_cevap = temiz_cevap[7:-3].strip()
-                elif temiz_cevap.startswith("```"):
-                    temiz_cevap = temiz_cevap[3:-3].strip()
 
-                # 4. JSON'ı Okuma ve Dinamik Alet Çalıştırma
-                karar = json.loads(temiz_cevap)
-                alet_adi = karar.get("kullanilacak_alet")
-                parametreler = karar.get("parametreler", {})
-                
-                print(f" AJAN KARARI: '{alet_adi}' aleti kullanılacak!")
-                print(f"    Parametreler: {parametreler}\n")
-                
-                result = await session.call_tool(
-                    alet_adi,
-                    arguments=parametreler
-                )
-                print(f" JİRA'DAN GELEN CEVAP: {result.content[0].text}")
-                
-            except json.JSONDecodeError:
-                print(f" Gemini düzgün formatta cevap veremedi. Gelen Cevap: \n{cevap.text}")
+            temiz = cevap.text.strip()
+            if temiz.startswith("```json"):
+                temiz = temiz[7:-3].strip()
+            elif temiz.startswith("```"):
+                temiz = temiz[3:-3].strip()
+
+            try:
+                karar = json.loads(temiz)
+            except:
+                return "Yapay zeka bir hata yaptı, lütfen tekrar dener misin?"
+
+            alet_adi = karar.get("kullanilacak_alet")
+            parametreler = karar.get("parametreler", {})
+
+            print(f"Ajan Kararı: {alet_adi} -> {parametreler}")
+
+            # EĞER EKSİK BİLGİ VARSA VEYA SOHBET EDİYORSA JİRA'YA GİTME, DİREKT CEVAP VER:
+            if alet_adi == "sohbet_et":
+                return parametreler.get("cevap_mesaji", "Nasıl yardımcı olabilirim?")
+
+            # DİĞER DURUMLARDA JİRA MCP'Yİ ÇALIŞTIR
+            try:
+                sonuc = await session.call_tool(alet_adi, arguments=parametreler)
+                return sonuc.content[0].text
             except Exception as e:
-                print(f" Hata oluştu: {str(e)}")
+                return f"Jira aracı çalıştırılamadı. Hata: {str(e)}"
+
+
+# YENİ YAPI: İşlemi arka plana atarak Slack'in 3 saniye kuralını (panik atak krizini) aşıyoruz!
+async def arka_planda_islem_yap(event, say):
+    raw_text = event.get('text', '')
+    kullanici = event.get('user')
+    temiz_mesaj = re.sub(r'<@.*?>', '', raw_text).strip()
+    
+    print(f"\nSlack'ten gelen talimat: {temiz_mesaj}")
+    await say(f"İsteğini aldım <@{kullanici}>, hemen ilgileniyorum... ⏳")
+
+    try:
+        jira_cevabi = await jira_islemini_yap(temiz_mesaj)
+        await say(f"İşlem Sonucu: \n{jira_cevabi}")
+    except Exception as e:
+        print(f"Hata: {str(e)}")
+        await say(f"Bir sorun çıktı: {str(e)}")
+
+@slack_app.event("app_mention")
+async def handle_mention(event, say):
+    # Slack'e anında "tamam" deyip görevi arka plana yolluyoruz (Tekrarlayan mesajları çözer)
+    asyncio.create_task(arka_planda_islem_yap(event, say))
+
+
+async def main():
+    print("Süper Akıllı Jira AI Ajanı Devrede! (Timeout korumalı)")
+    handler = AsyncSocketModeHandler(slack_app, os.getenv("SLACK_APP_TOKEN"))
+    await handler.start_async()
 
 if __name__ == "__main__":
     asyncio.run(main())

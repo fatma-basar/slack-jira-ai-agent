@@ -10,8 +10,9 @@ JIRA_EMAIL = os.getenv("JIRA_EMAIL")
 JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
 
 mcp = MCPServer("Jira MCP Sunucusu")
+
 @mcp.tool()
-def bilet_olustur(proje_kodu: str, baslik: str, aciklama: str) -> str:
+def bilet_olustur(proje_kodu: str, baslik: str, aciklama: str, oncelik: str = None, etiket: str = None) -> str:
     """Yeni bir Jira bileti açar. Kullanıcı bir hata bildirdiğinde veya görev istediğinde bunu kullan."""
     try:
         # 1. Şifrelerin gerçekten okunup okunmadığını kontrol ediyoruz
@@ -21,14 +22,23 @@ def bilet_olustur(proje_kodu: str, baslik: str, aciklama: str) -> str:
         # 2. URL'nin sonundaki fazladan slash '/' işaretini temizliyoruz ki link bozulmasın
         url = f"{JIRA_URL.rstrip('/')}/rest/api/2/issue"
         
+        # Temel alanları oluşturuyoruz
+        fields = {
+            "project": {"key": proje_kodu},
+            "summary": baslik,
+            "description": aciklama,
+            "issuetype": {"name": "Task"} 
+        }
+
+        # Eğer yapay zeka öncelik veya etiket gönderdiyse, onları da pakete ekliyoruz!
+        if oncelik:
+            fields["priority"] = {"name": oncelik}
+        
+        if etiket:
+            fields["labels"] = [etiket]
+
         payload = {
-            "fields": {
-                "project": {"key": proje_kodu},
-                "summary": baslik,
-                "description": aciklama,
-                # Eğer firmanızda "Task" yoksa, hatayı görünce burayı "Bug" yapacağız
-                "issuetype": {"name": "Task"} 
-            }
+            "fields": fields
         }
         
         response = requests.post(
@@ -39,7 +49,9 @@ def bilet_olustur(proje_kodu: str, baslik: str, aciklama: str) -> str:
         
         if response.status_code == 201:
             bilet_anahtari = response.json().get("key")
-            return f" GERÇEK BAŞARI: Jira'da {bilet_anahtari} kodlu bilet oluşturuldu!"
+            eklenen_oncelik = oncelik if oncelik else 'Varsayılan'
+            eklenen_etiket = etiket if etiket else 'Yok'
+            return f" GERÇEK BAŞARI: Jira'da {bilet_anahtari} kodlu bilet oluşturuldu! (Öncelik: {eklenen_oncelik}, Etiket: {eklenen_etiket})"
         else:
             return f" JIRA REDDETTİ: (Kod: {response.status_code}) Detay: {response.text}"
             
@@ -55,7 +67,6 @@ def bilet_guncelle(bilet_kodu: str, oncelik: str = None, etiket: str = None) -> 
         # Güncellenecek alanları dinamik olarak hazırlıyoruz
         guncellemeler = {}
         if oncelik:
-            # Jira'da öncelikler genelde High, Medium, Low şeklindedir
             guncellemeler["priority"] = [{"set": {"name": oncelik}}]
         if etiket:
             guncellemeler["labels"] = [{"add": etiket}]
@@ -75,6 +86,7 @@ def bilet_guncelle(bilet_kodu: str, oncelik: str = None, etiket: str = None) -> 
             
     except Exception as e:
         return f" YAZILIM HATASI: {str(e)}"
+
 @mcp.tool()
 def bilet_durumunu_guncelle(bilet_kodu: str, yeni_durum: str) -> str:
     """Var olan bir biletin durumunu (To Do, In Progress, Done) değiştirir."""
