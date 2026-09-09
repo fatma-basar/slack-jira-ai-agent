@@ -1,0 +1,21 @@
+import requests
+
+# Bizim yerel sunucumuzun adresi
+url = "http://127.0.0.1:8000/jira-webhook"
+
+# BURAYA JIRA'DA YENİ AÇTIĞIN BİLETİN KODUNU YAZ (Örn: STJ-15)
+sahte_jira_sinyali = {
+    "issue": {
+        "key": "TEAM-20",  # <-- KENDİ BİLET KODUNLA DEĞİŞTİR
+        "fields": {
+            "summary": "Ödeme seçeneklerine taksitlendirme özelliğini ekleyelim"
+        }
+    }
+}
+
+print("Jira taklit ediliyor... Sinyal sunucuya gonderiliyor!")
+try:
+    cevap = requests.post(url, json=sahte_jira_sinyali)
+    print("Sunucumuzun Cevabi:", cevap.json())
+except Exception as e:
+    print("Sunucuya baglanilamadi. Sunucunun (detailer.py) calistigindan emin ol!")
