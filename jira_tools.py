@@ -66,7 +66,7 @@ def bileti_kapat(bilet_kodu):
         # Jira'nın projedeki kapatma butonunun ID'sini buluyoruz
         for gecis in gecisler:
             isim = gecis['name'].lower()
-            if isim in ['done', 'tamamlandı', 'closed', 'kapat','tamam']:
+            if isim in ['done', 'tamamlandı', 'closed', 'kapat','Tamam']:
                 kapatma_id = gecis['id']
                 break
                 
