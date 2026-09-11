@@ -1,190 +1,179 @@
-import asyncio
-import os
-import sys
-import codecs
 import json
-import re
+import os
 from datetime import datetime
 from dotenv import load_dotenv
-from google import genai
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-from slack_bolt.async_app import AsyncApp
-from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+import google.generativeai as genai
 
-if sys.platform == "win32":
-    sys.stdout = codecs.getwriter("utf-8")(sys.stdout.detach())
-
+# ==========================================
+# GÜVENLİ API BAĞLANTISI (.env üzerinden)
 load_dotenv()
+gemini_sifresi = os.getenv("GEMINI_API_KEY")
+genai.configure(api_key=gemini_sifresi)
 
-slack_app = AsyncApp(token=os.getenv("SLACK_BOT_TOKEN"))
-gemini_client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Stabil ve hızlı model
+model = genai.GenerativeModel('gemini-3.5-flash') 
+# ==========================================
 
-bilet_hafizasi = {}
-sohbet_gecmisi = {} 
-
-async def mcp_ile_calistir(alet_adi, parametreler):
-    my_env = os.environ.copy()
-    my_env["PYTHONIOENCODING"] = "utf-8"
-    jira_tam_url = os.getenv("JIRA_URL", "")
-    site_adi = jira_tam_url.replace("https://", "").replace("http://", "").split(".")[0]
-    my_env["ATLASSIAN_SITE_NAME"] = site_adi
-    my_env["ATLASSIAN_USER_EMAIL"] = os.getenv("JIRA_EMAIL", "")
-    my_env["ATLASSIAN_API_TOKEN"] = os.getenv("JIRA_API_TOKEN", "")
-
-    server_params = StdioServerParameters(
-        command="npx",
-        args=["-y", "@aashari/mcp-server-atlassian-jira"],
-        env=my_env
-    )
-
-    try:
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                sonuc = await session.call_tool(alet_adi, arguments=parametreler)
-                return sonuc.content[0].text
-    except Exception as e:
-        return f"Hata olustu: {str(e)}"
-
-async def jira_islemini_yap(kullanici_mesaji: str, kullanici: str) -> tuple:
-    match = re.search(r'([a-zA-Z]+-\d+)', kullanici_mesaji)
-    if match:
-        bilet_hafizasi[kullanici] = match.group(1).upper()
-        
-    mevcut_bilet_key = bilet_hafizasi.get(kullanici)
-    onceki_mesaj = sohbet_gecmisi.get(kullanici, "YOK")
-
-    su_an = datetime.now()
-    gunler = ["Pazartesi", "Sali", "Carsamba", "Persembe", "Cuma", "Cumartesi", "Pazar"]
-    aylar = ["Ocak", "Subat", "Mart", "Nisan", "Mayis", "Haziran", "Temmuz", "Agustos", "Eylul", "Ekim", "Kasim", "Aralik"]
-    bugun_metin = f"{su_an.day} {aylar[su_an.month - 1]} {su_an.year} {gunler[su_an.weekday()]}, Saat: {su_an.strftime('%H:%M')}"
-
-    ek_bilgi = ""
+def ajan_calistir(kullanici_mesaji, onceki_mesaj="", mevcut_bilet_key=None, adim=0):
+    bugun_metin = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    for adim in range(2): 
-        prompt = f"""
-        Sen OTONOM bir Jira Ajanisin. Gerekirse once arama yapar, sonra islem yaparsin.
-        Zaman: {bugun_metin}. Hafizadaki Bilet: {mevcut_bilet_key if mevcut_bilet_key else "YOK"}
-        
-        Kullanicinin Onceki Mesaji: '{onceki_mesaj}'
-        Kullanicinin Yeni Mesaji: '{kullanici_mesaji}'
-        
-        {ek_bilgi}
-        
-        KESIN KURALLAR:
-        1. YENI GOREV ACMA: 'jira_post' kullan. Path: '/rest/api/2/issue', Body: {{"fields": {{"project": {{"key": "TEAM"}}, "summary": "Baslik", "description": "Detay", "issuetype": {{"name": "Task"}}}}}}
-        
-        2. ARAMA YAPMA (Kullanici "X isini hallettim" diyor ama X isi hafizadaki bilet degilse):
-           - KESINLIKLE once 'jira_get' aracini kullanip dogru bileti bul!
-           - Path: '/rest/api/2/search?jql=text~"kullanicinin_bahsettigi_kelime"'
-           
-        3. GOREV BITIRME/KAPATMA (Eger bilet numarasi kesinlesmisse veya az once arama yapip bulduysan):
-           - 'jira_post' kullan. Path: '/rest/api/2/issue/BILET_KODU/transitions'. Body: {{"transition": {{"id": "31"}}}}
-           
-        4. Eger bilet bulamadiysan veya emin degilsen: 'soru_sor' aracini kullan.
+    prompt = f"""
+    Sen OTONOM bir Jira Ajanisin. Gerekirse once arama yapar, sonra islem yaparsin.
+    Zaman: {bugun_metin}. Hafizadaki Bilet: {mevcut_bilet_key if mevcut_bilet_key else "YOK"}
+    
+    Kullanicinin Onceki Mesaji: '{onceki_mesaj}'
+    Kullanicinin Yeni Mesaji: '{kullanici_mesaji}'
+    
+    KESIN KURALLAR (Sırasıyla uygula):
+    1. 🔴 MUTLAK KURAL - SESSİZLİK: Eger 'Kullanicinin Yeni Mesaji' sadece "selam", "merhaba", "gunaydin", "naber", "yemek" gibi kelimelerden ibaretse ve teknik bir is TALEBI DEGILSE:
+       - Onceki mesajlari ve biletleri TAMAMEN GORMEZDEN GEL!
+       - KESINLIKLE 'sessiz_kal' aracini sec! 
+       - Asla kibarlik yapma, asla yardimci olmaya calisma, asla soru_sor kullanma!
 
-        SADECE asagidaki JSON formatinda cevap ver:
-        {{
-            "kullanilacak_alet": "secilen_aletin_adi",
-            "parametreler": {{
-                "parametre_adi": "deger"
-            }}
+    2. YENI GOREV ACMA (Kullanici yepyeni bir is/talep veriyorsa): 
+       - 'jira_post' kullan. Path: '/rest/api/2/issue', Body: {{"fields": {{"project": {{"key": "TEAM"}}, "summary": "Baslik", "description": "Detay", "issuetype": {{"name": "Task"}}}}}}
+       
+    3. ARAMA YAPMA (Kullanici "X duzeltildi", "hallettim" diyorsa ama bilet kodunu vermiyorsa):
+       - HEMEN SORU SORMA! KESINLIKLE once 'jira_get' aracini kullanarak arama yap!
+       - Path: '/rest/api/2/search?jql=text~\\"aranacak_kelime\\"'
+       
+    4. GOREV KAPATMA (Eger bilet numarasi verilmişse veya az once arama yapip bilet kodunu bulduysan):
+       - 'jira_post' kullan. Path: '/rest/api/2/issue/BILET_KODU/transitions'. Body: {{"transition": {{"id": "31"}}}}
+       
+    5. EKSIK GOREV BILGISI (SADECE teknik bir is istediyse ama detay vermediyse):
+       - 'soru_sor' aracini kullan ve 'mesaj' parametresi ile eksik olan detayi sor.
+
+    SADECE asagidaki JSON formatinda cevap ver (Baska metin ekleme):
+    {{
+        "kullanilacak_alet": "secilen_aletin_adi",
+        "parametreler": {{
+            "mesaj": "deger_veya_soru"
         }}
-        """
+    }}
+    """
 
-        chat = gemini_client.chats.create(model='gemini-3.5-flash')
-        cevap = chat.send_message(prompt)
-
-        sohbet_gecmisi[kullanici] = kullanici_mesaji
-
-        temiz = cevap.text.strip()
-        if temiz.startswith("```json"):
-            temiz = temiz[7:-3].strip()
-        elif temiz.startswith("```"):
-            temiz = temiz[3:-3].strip()
-
-        try:
-            karar = json.loads(temiz)
-        except:
-            return "YOK", "YOK", {}
-
-        alet_adi = karar.get("kullanilacak_alet")
-        parametreler = karar.get("parametreler", {})
-
-        if alet_adi == "YOK" or alet_adi == "sohbet_et":
-            return "YOK", "YOK", {}
-
-        print(f"[ADIM {adim+1}] Ajan Karari: {alet_adi} -> {parametreler}", flush=True)
-
-        if alet_adi == "soru_sor":
-            return parametreler.get("mesaj", "Hangi görevden bahsediyorsun?"), "soru_sor", parametreler
-
-        mcp_sonucu = await mcp_ile_calistir(alet_adi, parametreler)
-
-        # --- YENİ EKLENEN KISIM: KATI EMİR VE VERİ KISALTMA ---
-        if alet_adi == "jira_get" and "/search" in parametreler.get("path", ""):
-            kisaltilmis_sonuc = mcp_sonucu[:2000] # Veriyi kucult ki kafasi karismasin
-            ek_bilgi = f"\n[SISTEMDEN ZORUNLU EMIR]: Az once arama yaptin ve su sonucu buldun: {kisaltilmis_sonuc}\nDIKKAT: KESINLIKLE 2. KEZ ARAMA YAPMA! Eger sonuclar icinde 'key' (Orn: TEAM-XX) degeri goruyorsan, hemen 'jira_post' aracini kullanarak KAPATMA (/transitions) islemini yap. Eger sonuc bossa 'soru_sor' aracini kullan."
-            print("Ajan arama yapti, 2. adima (karar/kapatma) geciliyor...", flush=True)
-            continue 
-        
-        else:
-            return mcp_sonucu, alet_adi, parametreler
-
-    return "Ajan islemi 2 adimda tamamlayamadi. Lutfen bilet kodunu (Orn: TEAM-15) belirterek tekrar deneyin.", "YOK", {}
-
-async def arka_planda_islem_yap(event, say):
-    raw_text = event.get('text', '')
-    kullanici = event.get('user')
-    temiz_mesaj = re.sub(r'<@.*?>', '', raw_text).strip()
+    response = model.generate_content(prompt)
+    metin_cevap = response.text.replace("```json", "").replace("```", "").strip()
     
     try:
-        jira_cevabi, kullanilan_alet, parametreler = await jira_islemini_yap(temiz_mesaj, kullanici)
-        
-        if jira_cevabi != "YOK":
-            kapatilan_bilet_match = re.search(r'issue/([A-Z]+-\d+)', parametreler.get("path", ""))
-            aktif_bilet = kapatilan_bilet_match.group(1) if kapatilan_bilet_match else bilet_hafizasi.get(kullanici, "")
-
-            if kullanilan_alet == "jira_post" and "/transitions" in parametreler.get("path", ""):
-                jira_cevabi = f"Harika! Senin icin arastirdim, {aktif_bilet} numarali gorevi buldum ve basariyla 'Tamamlandi' (Done) olarak isaretledim."
-                bilet_hafizasi[kullanici] = None 
-            
-            elif kullanilan_alet == "jira_put":
-                jira_cevabi = f"{aktif_bilet} numarali bilet basariyla guncellendi."
-                
-            elif kullanilan_alet == "jira_post":
-                match = re.search(r'([A-Z]+-\d+)', jira_cevabi)
-                if match:
-                    yeni_bilet = match.group(1).upper()
-                    bilet_hafizasi[kullanici] = yeni_bilet 
-                    print(f"HAFIZAYA KAYDEDILDI: Kullanici({kullanici}) -> {yeni_bilet}", flush=True)
-                    
-            gercek_thread_ts = event.get('thread_ts')
-            if gercek_thread_ts:
-                await say(text=f"<@{kullanici}>\n{jira_cevabi}", thread_ts=gercek_thread_ts)
-            else:
-                await say(f"<@{kullanici}>\n{jira_cevabi}")
-            
+        veri = json.loads(metin_cevap)
+        alet_adi = veri.get("kullanilacak_alet", "YOK")
+        parametreler = veri.get("parametreler", {})
     except Exception as e:
-        print(f"Arka plan islem hatasi: {str(e)}", flush=True)
+        print(f"JSON Parse Hatasi: {e}")
+        return "YOK", "YOK", {}
 
-@slack_app.event("message")
-async def handle_message(event, say):
-    if "bot_id" in event:
-        return
-    asyncio.create_task(arka_planda_islem_yap(event, say))
+    if alet_adi == "YOK":
+        return "YOK", "YOK", {}
 
-@slack_app.event("app_mention")
-async def handle_mention(event, say):
-    if "bot_id" in event:
-        return
-    asyncio.create_task(arka_planda_islem_yap(event, say))
+    if alet_adi == "sessiz_kal":
+        print(f"[ADIM {adim+1}] Ajan Karari: {alet_adi} -> İlgisiz mesaj, bot sessiz kaliyor.", flush=True)
+        return "", "sessiz_kal", {} 
 
-async def main():
-    print("ENTERPRISE JIRA AJANI (V5.1 - OTONOM ARAMA HATASI GIDERILDI)", flush=True)
-    handler = AsyncSocketModeHandler(slack_app, os.getenv("SLACK_APP_TOKEN"))
-    await handler.start_async()
+    print(f"[ADIM {adim+1}] Ajan Karari: {alet_adi} -> {parametreler}", flush=True)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    if alet_adi == "soru_sor":
+        cevap_metni = parametreler.get("mesaj", parametreler.get("soru", "Hangi görevden bahsediyorsun?"))
+        return cevap_metni, "soru_sor", parametreler
+
+    return "", alet_adi, parametreler
+
+def analist_detay_uret(kisa_baslik):
+    print(f"🧠 Yapay zeka '{kisa_baslik}' için detayları düşünüyor...")
+    
+    prompt = f"""
+    Sen, yazilim projelerinde gorev alan uzman bir 'Senior Is Analisti'sin.
+    Asagidaki kisa gorev basligini al ve yazilim ekibi icin detayli bir Jira aciklamasina donustur.
+
+    Gorev Basligi: "{kisa_baslik}"
+
+    KURAL: Ciktini KESINLIKLE asagidaki Markdown sablonuna birebir uyarak uret. Ekstra sohbet metni yazma.
+
+    ## Gorev Ozeti
+    [2-3 cumlelik net aciklama]
+
+    ## Kullanici Hikayesi
+    * **Kullanici Olarak:** [Kimin icin?]
+    * **Istegim:** [Ne yapilacak?]
+    * **Amacim:** [Faydasi ne?]
+
+    ## Kabul Kriterleri (Acceptance Criteria)
+    * 
+    * 
+
+    ## Teknik Gereksinimler
+    1. 
+    2. 
+
+    ## Test Senaryolari
+    * Pozitif Senaryo:
+    * Negatif Senaryo:
+
+    ## Riskler ve Bagimliliklar
+    [Varsa riskler, yoksa 'Bilinen risk yok' yaz.]
+    """
+    try:
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        print(f"Analiz Hatası: {e}")
+        return "Detaylar üretilirken bir hata oluştu."
+
+def bilet_eslestir_ai(kullanici_mesaji, acik_biletler):
+    """Kullanıcının yazdığı mesajla, Jira'daki açık biletleri anlamsal olarak eşleştirir."""
+    if not acik_biletler:
+        return "YOK"
+        
+    # Biletleri alt alta metin haline getiriyoruz (AI okusun diye)
+    biletler_metni = "\n".join([f"- {b['key']}: {b['summary']}" for b in acik_biletler])
+    
+    print("🧠 Yapay zeka biletler arasında anlamsal eşleştirme yapıyor...")
+    
+    prompt = f"""
+    Sen akıllı bir asistansın. Kullanıcı bir yazılım görevini tamamladığını söylüyor.
+    Kullanıcının Mesajı: "{kullanici_mesaji}"
+    
+    Jira'da şu an açık olan görevler şunlar:
+    {biletler_metni}
+    
+    GÖREV: Kullanıcının mesajında bahsettiği iş, yukarıdaki biletlerden hangisi olabilir?
+    (Örneğin kullanıcı 'odeme' diyorsa ve bilette 'ödeme' yazıyorsa anlamsal olarak eşleştir).
+    
+    KURAL: SADECE eşleşen biletin kodunu (Örn: SCRUM-9) yaz. Başka hiçbir kelime veya nokta ekleme.
+    Eğer hiçbir biletle alakası yoksa sadece YOK yaz.
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        sonuc = response.text.strip()
+        return sonuc
+    except Exception as e:
+        print(f"Eşleştirme Hatası: {e}")
+        return "YOK"   
+
+def yazilimci_ai(kullanici_mesaji, mevcut_kod):
+    """Yapay zekanın mevcut kodu okuyup kullanıcının isteğine göre yeniden yazmasını sağlar."""
+    print("🧠 Yapay Zeka Yazılımcı (AI Coder) dosyayı inceliyor ve kodu yazıyor...")
+    
+    prompt = f"""
+    Sen uzman bir Frontend yazılımcısısın (AI Coder).
+    Kullanıcının Slack'ten gelen isteği: "{kullanici_mesaji}"
+    
+    Mevcut index.html dosyasının içeriği:
+    {mevcut_kod}
+    
+    GÖREV: Kullanıcının isteğine göre yukarıdaki HTML kodunu düzelt veya istenen yeni özelliği ekle.
+    
+    KURAL: BANA SADECE ÇALIŞIR DURUMDAKİ YENİ HTML KODUNU VER. 
+    Başına veya sonuna "İşte kodunuz", "```html" gibi hiçbir markdown, açıklama veya sohbet metni EKLEME. 
+    SADECE DOĞRUDAN KODU YAZ, çünkü senin çıktın doğrudan index.html dosyasının içine kaydedilecek!
+    """
+    
+    try:
+        response = model.generate_content(prompt)
+        # Bazen AI inatla ```html ekleyebilir, onu temizliyoruz ki dosya bozulmasın
+        temiz_kod = response.text.replace("```html", "").replace("```", "").strip()
+        return temiz_kod
+    except Exception as e:
+        print(f"Yapay Zeka Kodlama Hatası: {e}")
+        return None     
