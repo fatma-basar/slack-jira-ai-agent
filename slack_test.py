@@ -22,26 +22,36 @@ async def mesaj_dinleyici(message, say):
     if "bot_id" not in message:
         gelen_metin = message.get('text', '')
         kanal_id = message.get('channel', '')
-        print(f"\n👤 KULLANICI YAZDI: {gelen_metin}")
+        
+        # Windows'ta donmayı engellemek için flush=True eklendi
+        print(f"\n👤 KULLANICI YAZDI: {gelen_metin}", flush=True)
         
         cevap, alet, parametreler = await ajan_calistir(gelen_metin)
         
         if alet == "sessiz_kal":
-            print("🤫 Ajan sessiz kalmayı seçti. Slack'e mesaj atılmadı.")
+            print("🤫 Ajan sessiz kalmayı seçti. Slack'e mesaj atılmadı.", flush=True)
             
         elif alet == "jira_post":
-            alanlar = parametreler.get('body', {}).get('fields', {})
+            
+            # 🚀 KRİTİK DÜZELTME: Parametrelerin içini güvenli hale getiriyoruz
+            if 'body' not in parametreler: parametreler['body'] = {}
+            if 'fields' not in parametreler['body']: parametreler['body']['fields'] = {}
+            
+            alanlar = parametreler['body']['fields']
             baslik = alanlar.get('summary', 'Yeni Görev')
             
+            # 🚀 PROJEYİ KOŞULSUZ ŞARTSIZ ZORLA EKLİYORUZ
             proje_kodu = aktif_projeyi_bul(kanal_id)
-            if 'project' in alanlar:
-                alanlar['project']['key'] = proje_kodu
+            alanlar['project'] = {'key': proje_kodu}
             
             await say(f"⏳ Harika! Jira'da arka planda *'{baslik}'* adıyla {proje_kodu} projesine görevi oluşturuyorum... 🛠️")
             
             mcp_cevap = await _mcp_motoru_async("jira_post", parametreler)
             
-            # 🌟 YENİ MİMARİ: Bilet Kodunu AI Buluyor (Spagetti kodlar silindi)
+            # 📦 JIRA'nın cevabını görmek için ekrana basıyoruz
+            print(f"\n📦 JIRA CEVABI:\n{mcp_cevap}\n", flush=True)
+            
+            # 🌟 YENİ MİMARİ: Bilet Kodunu AI Buluyor
             bilet_kodu = await ai_veri_cikar(mcp_cevap, f"Oluşturulan biletin {proje_kodu} ile başlayan anahtar kodu (key)")
             
             if bilet_kodu:
@@ -70,7 +80,7 @@ async def mesaj_dinleyici(message, say):
                         gecis_param = {"path": f"/rest/api/2/issue/{bilet_kodu}/transitions"}
                         gecisler_cevap = await _mcp_motoru_async("jira_get", gecis_param)
                         
-                        # 🌟 YENİ MİMARİ: Kapatma Butonu ID'sini de AI Buluyor (json.loads çökmeleri bitti!)
+                        # Kapatma Butonu ID'sini de AI Buluyor
                         kapatma_id = await ai_veri_cikar(gecisler_cevap, "'Tamamlandı' veya 'Done' ismine sahip durumun id numarası")
                         
                         if kapatma_id:
@@ -104,7 +114,6 @@ async def mesaj_dinleyici(message, say):
                 gecis_param = {"path": f"/rest/api/2/issue/{eslesen_kod}/transitions"}
                 gecisler_cevap = await _mcp_motoru_async("jira_get", gecis_param)
                 
-                # 🌟 YENİ MİMARİ: Arama kısmındaki bilet kapatmada da AI devrede!
                 kapatma_id = await ai_veri_cikar(gecisler_cevap, "'Tamamlandı' veya 'Done' ismine sahip durumun id numarası")
                 
                 if kapatma_id:
@@ -131,5 +140,8 @@ async def ana_program():
     await handler.start_async()
 
 if __name__ == "__main__":
-    print("🚀 Slack Botu (YENİ AI OKUMA MİMARİSİYLE) ayağa kalktı ve dinlemeye başladı...")
-    asyncio.run(ana_program())
+    print("🚀 Slack Botu (YENİ AI OKUMA MİMARİSİYLE) ayağa kalktı ve dinlemeye başladı...", flush=True)
+    try:
+        asyncio.run(ana_program())
+    except KeyboardInterrupt:
+        print("\n🛑 Bot durduruldu.", flush=True)
